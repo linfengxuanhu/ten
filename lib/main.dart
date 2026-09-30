@@ -1,6 +1,9 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:url_launcher/url_launcher.dart';
+import 'package:webview_flutter_geckoview/webview_flutter_geckoview.dart';
+import 'package:webview_flutter_platform_interface/webview_flutter_platform_interface.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -102,8 +105,17 @@ class _CouncilHomeState extends State<CouncilHome> {
   final TextEditingController _prompt =
       TextEditingController();
 
+  final List<PlatformWebViewController?> _controllers =
+      List<PlatformWebViewController?>.filled(
+    sites.length,
+    null,
+  );
+
   final List<String> _status =
-      List<String>.filled(sites.length, '未打开');
+      List<String>.filled(
+    sites.length,
+    '未加载',
+  );
 
   int _tab = 0;
   bool _showResults = false;
@@ -117,20 +129,28 @@ class _CouncilHomeState extends State<CouncilHome> {
 
   @override
   void dispose() {
+    for (final controller in _controllers) {
+      controller?.dispose();
+    }
+
     _prompt.dispose();
+
     super.dispose();
   }
 
   Future<void> _restorePrompt() async {
-    final p = await SharedPreferences.getInstance();
+    final p =
+        await SharedPreferences.getInstance();
 
     if (!mounted) return;
 
-    _prompt.text = p.getString('last_prompt') ?? '';
+    _prompt.text =
+        p.getString('last_prompt') ?? '';
   }
 
   Future<void> _savePrompt() async {
-    final p = await SharedPreferences.getInstance();
+    final p =
+        await SharedPreferences.getInstance();
 
     await p.setString(
       'last_prompt',
@@ -166,7 +186,10 @@ class _CouncilHomeState extends State<CouncilHome> {
     }
   }
 
-  void _setStatus(int i, String status) {
+  void _setStatus(
+    int i,
+    String status,
+  ) {
     if (!mounted) return;
 
     setState(() {
@@ -174,34 +197,254 @@ class _CouncilHomeState extends State<CouncilHome> {
     });
   }
 
-  Future<void> _openAi(int i) async {
-    final site = sites[i];
+  String _jsEscape(String text) {
+    return jsonEncode(text);
+  }
 
-    _setStatus(i, '正在打开');
+  String _dispatchScript(
+    String prompt,
+  ) {
+    final escaped =
+        _jsEscape(prompt);
 
-    final uri = Uri.parse(site.url);
+    return '''
+(function() {
 
-    try {
-      final success = await launchUrl(
-        uri,
-        mode: LaunchMode.inAppBrowserView,
+  const text = $escaped;
+
+  const selectors = [
+    'textarea',
+    'textarea[placeholder]',
+    'div[contenteditable="true"]',
+    'div[role="textbox"]',
+    'input[type="text"]'
+  ];
+
+  let el = null;
+
+  for (const selector of selectors) {
+
+    const elements =
+        Array.from(
+          document.querySelectorAll(selector)
+        );
+
+    el = elements.find((x) => {
+
+      const r =
+          x.getBoundingClientRect();
+
+      const style =
+          getComputedStyle(x);
+
+      return (
+        r.width > 0 &&
+        r.height > 0 &&
+        style.visibility !== 'hidden'
+      );
+    });
+
+    if (el) break;
+  }
+
+  if (!el) {
+    return 'NO_INPUT';
+  }
+
+  el.focus();
+
+  if (
+    el.tagName === 'TEXTAREA' ||
+    el.tagName === 'INPUT'
+  ) {
+
+    const setter =
+        Object.getOwnPropertyDescriptor(
+          Object.getPrototypeOf(el),
+          'value'
+        )?.set;
+
+    if (setter) {
+      setter.call(el, text);
+    } else {
+      el.value = text;
+    }
+
+  } else {
+
+    el.innerText = text;
+  }
+
+  el.dispatchEvent(
+    new Event(
+      'input',
+      { bubbles: true }
+    )
+  );
+
+  el.dispatchEvent(
+    new Event(
+      'change',
+      { bubbles: true }
+    )
+  );
+
+  const buttons =
+      Array.from(
+        document.querySelectorAll('button')
       );
 
-      if (success) {
-        _setStatus(i, '已打开');
-      } else {
-        _setStatus(i, '打开失败');
-      }
-    } catch (e) {
-      _setStatus(i, '打开失败');
+  const labels =
+      buttons.map((button) => {
+
+        return (
+          (button.getAttribute('aria-label') || '') +
+          ' ' +
+          (button.getAttribute('title') || '') +
+          ' ' +
+          (button.innerText || '')
+        ).toLowerCase();
+
+      });
+
+  const keys = [
+    'send',
+    'submit',
+    '发送',
+    '提交',
+    'ask',
+    'go',
+    '生成',
+    '发送消息'
+  ];
+
+  let button = null;
+
+  for (
+    let i = 0;
+    i < buttons.length;
+    i++
+  ) {
+
+    const r =
+        buttons[i].getBoundingClientRect();
+
+    if (
+      r.width <= 0 ||
+      r.height <= 0
+    ) {
+      continue;
+    }
+
+    if (
+      keys.some(
+        (key) =>
+            labels[i].includes(key)
+      )
+    ) {
+
+      button = buttons[i];
+
+      break;
     }
   }
 
-  Future<void> _openAll() async {
-    if (_prompt.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+  if (button) {
+
+    button.click();
+
+    return 'SENT_BUTTON';
+  }
+
+  el.dispatchEvent(
+    new KeyboardEvent(
+      'keydown',
+      {
+        key: 'Enter',
+        code: 'Enter',
+        keyCode: 13,
+        which: 13,
+        bubbles: true
+      }
+    )
+  );
+
+  return 'SENT_ENTER';
+
+})();
+''';
+  }
+
+  Future<void> _sendTo(int i) async {
+    final controller =
+        _controllers[i];
+
+    final prompt =
+        _prompt.text.trim();
+
+    if (
+      controller == null ||
+      prompt.isEmpty
+    ) {
+      return;
+    }
+
+    _setStatus(
+      i,
+      '发送中',
+    );
+
+    try {
+
+      final result =
+          await controller
+              .runJavaScriptReturningResult(
+        _dispatchScript(prompt),
+      );
+
+      final resultText =
+          result.toString();
+
+      if (
+        resultText.contains(
+          'NO_INPUT',
+        )
+      ) {
+
+        _setStatus(
+          i,
+          '未找到输入框',
+        );
+
+      } else {
+
+        _setStatus(
+          i,
+          '已尝试发送',
+        );
+      }
+
+    } catch (e) {
+
+      _setStatus(
+        i,
+        '自动发送失败',
+      );
+    }
+  }
+
+  Future<void> _sendAll() async {
+
+    if (
+      _prompt.text.trim().isEmpty
+    ) {
+
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(
         const SnackBar(
-          content: Text('先输入一个问题'),
+          content:
+              Text('先输入一个问题'),
         ),
       );
 
@@ -215,65 +458,187 @@ class _CouncilHomeState extends State<CouncilHome> {
       _showResults = false;
     });
 
-    /*
-     * Custom Tabs 无法像 WebView 一样向网页注入 JavaScript，
-     * 因此这里不能自动把问题填入 8 个 AI 的输入框。
-     *
-     * 这里依次打开 8 个 AI 网页。
-     * 打开后可以在各自网页版中直接使用。
-     */
+    for (
+      var i = 0;
+      i < sites.length;
+      i++
+    ) {
 
-    for (var i = 0; i < sites.length; i++) {
-      await _openAi(i);
+      await _sendTo(i);
 
       await Future.delayed(
-        const Duration(milliseconds: 400),
+        const Duration(
+          milliseconds: 300,
+        ),
       );
     }
 
     if (mounted) {
+
       setState(() {
         _sending = false;
       });
     }
   }
 
-  Widget _siteHeader(int i) {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: 12,
-        vertical: 7,
+  Future<PlatformWebViewController>
+      _createController(
+    int index,
+  ) async {
+
+    final controller =
+        PlatformWebViewController(
+      GeckoWebViewControllerCreationParams(),
+    );
+
+    await controller.setJavaScriptMode(
+      JavaScriptMode.unrestricted,
+    );
+
+    await controller.setBackgroundColor(
+      Colors.white,
+    );
+
+    controller.setPlatformNavigationDelegate(
+      PlatformNavigationDelegate(
+        const PlatformNavigationDelegateCreationParams(),
+      )
+        ..setOnPageStarted(
+          (String url) {
+            _setStatus(
+              index,
+              '加载中',
+            );
+          },
+        )
+        ..setOnPageFinished(
+          (String url) {
+            _setStatus(
+              index,
+              '就绪',
+            );
+          },
+        )
+        ..setOnProgress(
+          (int progress) {
+            if (progress >= 90) {
+              _setStatus(
+                index,
+                '加载中',
+              );
+            }
+          },
+        )
+        ..setOnNavigationRequest(
+          (NavigationRequest request) {
+
+            return NavigationDecision
+                .navigate;
+          },
+        )
+        ..setOnUrlChange(
+          (UrlChange change) {},
+        ),
+    );
+
+    await controller.loadRequest(
+      LoadRequestParams(
+        uri: Uri.parse(
+          sites[index].url,
+        ),
       ),
-      color: _siteColor(i).withValues(alpha: .08),
+    );
+
+    return controller;
+  }
+
+  Future<void> _ensureController(
+    int index,
+  ) async {
+
+    if (
+      _controllers[index] != null
+    ) {
+      return;
+    }
+
+    final controller =
+        await _createController(
+      index,
+    );
+
+    if (!mounted) {
+
+      controller.dispose();
+
+      return;
+    }
+
+    setState(() {
+      _controllers[index] =
+          controller;
+    });
+  }
+
+  Widget _siteHeader(int i) {
+
+    final controller =
+        _controllers[i];
+
+    return Container(
+      padding:
+          const EdgeInsets.symmetric(
+        horizontal: 10,
+        vertical: 5,
+      ),
+      color:
+          _siteColor(i)
+              .withValues(alpha: .08),
       child: Row(
         children: [
+
           CircleAvatar(
             radius: 15,
-            backgroundColor: _siteColor(i),
+            backgroundColor:
+                _siteColor(i),
             child: Text(
-              sites[i].name.substring(0, 1),
-              style: const TextStyle(
+              sites[i]
+                  .name
+                  .substring(0, 1),
+              style:
+                  const TextStyle(
                 color: Colors.white,
                 fontSize: 13,
               ),
             ),
           ),
 
-          const SizedBox(width: 9),
+          const SizedBox(
+            width: 9,
+          ),
 
           Text(
             sites[i].name,
-            style: const TextStyle(
-              fontWeight: FontWeight.bold,
+            style:
+                const TextStyle(
+              fontWeight:
+                  FontWeight.bold,
             ),
           ),
 
-          const SizedBox(width: 10),
+          const SizedBox(
+            width: 10,
+          ),
 
           Text(
             _status[i],
             style: TextStyle(
-              color: _status[i].contains('失败')
+              color: _status[i]
+                      .contains('失败') ||
+                  _status[i]
+                      .contains('错误') ||
+                  _status[i]
+                      .contains('未')
                   ? Colors.red
                   : Colors.grey.shade700,
               fontSize: 12,
@@ -283,108 +648,171 @@ class _CouncilHomeState extends State<CouncilHome> {
           const Spacer(),
 
           IconButton(
-            tooltip: '打开',
-            icon: const Icon(
-              Icons.open_in_browser,
+            tooltip: '后退',
+            icon:
+                const Icon(
+              Icons.arrow_back,
+              size: 19,
+            ),
+            onPressed:
+                controller == null
+                    ? null
+                    : () async {
+
+                        if (
+                          await controller
+                              .canGoBack()
+                        ) {
+                          await controller
+                              .goBack();
+                        }
+                      },
+          ),
+
+          IconButton(
+            tooltip: '刷新',
+            icon:
+                const Icon(
+              Icons.refresh,
               size: 20,
             ),
-            onPressed: () => _openAi(i),
+            onPressed:
+                controller == null
+                    ? null
+                    : () =>
+                        controller.reload(),
           ),
         ],
       ),
     );
   }
 
-  Widget _aiCard(int i) {
-    return Card(
-      margin: const EdgeInsets.symmetric(
-        horizontal: 10,
-        vertical: 5,
-      ),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: () => _openAi(i),
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Row(
+  Widget _webView(int i) {
+
+    final controller =
+        _controllers[i];
+
+    if (controller == null) {
+
+      return FutureBuilder<
+          PlatformWebViewController>(
+        future:
+            _createController(i),
+        builder:
+            (
+          context,
+          snapshot,
+        ) {
+
+          if (
+            snapshot.connectionState ==
+                ConnectionState.done &&
+            snapshot.hasData
+          ) {
+
+            final c =
+                snapshot.data!;
+
+            _controllers[i] =
+                c;
+
+            return Column(
+              children: [
+
+                _siteHeader(i),
+
+                Expanded(
+                  child:
+                      PlatformWebViewWidget(
+                    PlatformWebViewWidgetCreationParams(
+                      controller: c,
+                    ),
+                  ).build(context),
+                ),
+              ],
+            );
+          }
+
+          return Column(
             children: [
-              CircleAvatar(
-                radius: 24,
-                backgroundColor: _siteColor(i),
-                child: Text(
-                  sites[i].name.substring(0, 1),
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                  ),
+
+              _siteHeader(i),
+
+              const Expanded(
+                child: Center(
+                  child:
+                      CircularProgressIndicator(),
                 ),
-              ),
-
-              const SizedBox(width: 14),
-
-              Expanded(
-                child: Column(
-                  crossAxisAlignment:
-                      CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      sites[i].name,
-                      style: const TextStyle(
-                        fontSize: 17,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-
-                    const SizedBox(height: 4),
-
-                    Text(
-                      _status[i],
-                      style: TextStyle(
-                        color: _status[i].contains('失败')
-                            ? Colors.red
-                            : Colors.grey.shade600,
-                        fontSize: 13,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
-              const Icon(
-                Icons.arrow_forward_ios,
-                size: 18,
               ),
             ],
-          ),
+          );
+        },
+      );
+    }
+
+    return Column(
+      children: [
+
+        _siteHeader(i),
+
+        Expanded(
+          child:
+              PlatformWebViewWidget(
+            PlatformWebViewWidgetCreationParams(
+              controller:
+                  controller,
+            ),
+          ).build(context),
         ),
-      ),
+      ],
     );
   }
 
   Widget _results() {
+
     return ListView.builder(
-      padding: const EdgeInsets.all(10),
-      itemCount: sites.length,
-      itemBuilder: (context, i) {
+      padding:
+          const EdgeInsets.all(10),
+      itemCount:
+          sites.length,
+      itemBuilder:
+          (context, i) {
+
         return Card(
-          child: ExpansionTile(
-            leading: CircleAvatar(
-              backgroundColor: _siteColor(i),
-              child: Text(
-                sites[i].name.substring(0, 1),
-                style: const TextStyle(
-                  color: Colors.white,
+          child:
+              ExpansionTile(
+            leading:
+                CircleAvatar(
+              backgroundColor:
+                  _siteColor(i),
+              child:
+                  Text(
+                sites[i]
+                    .name
+                    .substring(0, 1),
+                style:
+                    const TextStyle(
+                  color:
+                      Colors.white,
                 ),
               ),
             ),
-            title: Text(sites[i].name),
-            subtitle: Text(_status[i]),
+            title:
+                Text(
+              sites[i].name,
+            ),
+            subtitle:
+                Text(
+              _status[i],
+            ),
             children: const [
+
               Padding(
-                padding: EdgeInsets.all(14),
-                child: Text(
-                  '当前版本使用 Android Custom Tabs 打开 AI 官方网页版。这样可以使用手机浏览器提供的网页环境、Cookie、登录状态和 JavaScript。',
+                padding:
+                    EdgeInsets.all(14),
+                child:
+                    Text(
+                  'AI Council 当前使用 Mozilla GeckoView 作为 Android 内置网页引擎。',
                 ),
               ),
             ],
@@ -395,36 +823,37 @@ class _CouncilHomeState extends State<CouncilHome> {
   }
 
   Widget _home() {
-    return ListView(
-      padding: const EdgeInsets.only(
-        top: 6,
-        bottom: 20,
-      ),
-      children: [
-        for (var i = 0; i < sites.length; i++)
-          _aiCard(i),
-      ],
-    );
+
+    return _webView(_tab);
   }
 
   @override
-  Widget build(BuildContext context) {
-    final body = _showResults
-        ? _results()
-        : _home();
+  Widget build(
+    BuildContext context,
+  ) {
 
     return Scaffold(
+
       appBar: AppBar(
-        title: const Text('AI Council'),
+
+        title:
+            const Text(
+          'AI Council',
+        ),
+
         actions: [
+
           IconButton(
             tooltip: '结果',
             onPressed: () {
+
               setState(() {
-                _showResults = !_showResults;
+                _showResults =
+                    !_showResults;
               });
             },
-            icon: Icon(
+            icon:
+                Icon(
               _showResults
                   ? Icons.home
                   : Icons.dashboard,
@@ -433,95 +862,131 @@ class _CouncilHomeState extends State<CouncilHome> {
         ],
       ),
 
-      body: Column(
+      body:
+          Column(
         children: [
+
           Material(
             elevation: 1,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(
+            child:
+                Padding(
+              padding:
+                  const EdgeInsets.fromLTRB(
                 10,
                 8,
                 10,
                 8,
               ),
-              child: Row(
+              child:
+                  Row(
                 children: [
+
                   Expanded(
-                    child: TextField(
-                      controller: _prompt,
+                    child:
+                        TextField(
+                      controller:
+                          _prompt,
                       minLines: 1,
                       maxLines: 4,
                       textInputAction:
                           TextInputAction.send,
-                      onSubmitted: (_) => _openAll(),
+                      onSubmitted:
+                          (_) =>
+                              _sendAll(),
                       decoration:
                           const InputDecoration(
                         hintText:
                             '输入一个问题',
                         border:
                             OutlineInputBorder(),
-                        isDense: true,
+                        isDense:
+                            true,
                       ),
                     ),
                   ),
 
-                  const SizedBox(width: 8),
+                  const SizedBox(
+                    width: 8,
+                  ),
 
                   FilledButton.icon(
                     onPressed:
-                        _sending ? null : _openAll,
-                    icon: _sending
-                        ? const SizedBox(
-                            width: 17,
-                            height: 17,
-                            child:
-                                CircularProgressIndicator(
-                              strokeWidth: 2,
-                            ),
-                          )
-                        : const Icon(
-                            Icons.open_in_browser,
-                          ),
-                    label: const Text('全开'),
+                        _sending
+                            ? null
+                            : _sendAll,
+                    icon:
+                        _sending
+                            ? const SizedBox(
+                                width: 17,
+                                height: 17,
+                                child:
+                                    CircularProgressIndicator(
+                                  strokeWidth:
+                                      2,
+                                ),
+                              )
+                            : const Icon(
+                                Icons
+                                    .send,
+                              ),
+                    label:
+                        const Text(
+                      '全发',
+                    ),
                   ),
                 ],
               ),
             ),
           ),
 
-          if (!_showResults)
-            SizedBox(
-              height: 46,
-              child: ListView.separated(
-                padding:
-                    const EdgeInsets.symmetric(
-                  horizontal: 8,
-                ),
-                scrollDirection:
-                    Axis.horizontal,
-                itemCount: sites.length,
-                separatorBuilder: (_, __) =>
-                    const SizedBox(width: 4),
-                itemBuilder: (_, i) {
-                  return ChoiceChip(
-                    label: Text(
-                      sites[i].name,
-                    ),
-                    selected: _tab == i,
-                    onSelected: (_) {
-                      setState(() {
-                        _tab = i;
-                      });
-
-                      _openAi(i);
-                    },
-                  );
-                },
+          SizedBox(
+            height: 46,
+            child:
+                ListView.separated(
+              padding:
+                  const EdgeInsets.symmetric(
+                horizontal: 8,
               ),
+              scrollDirection:
+                  Axis.horizontal,
+              itemCount:
+                  sites.length,
+              separatorBuilder:
+                  (_, __) =>
+                      const SizedBox(
+                width: 4,
+              ),
+              itemBuilder:
+                  (_, i) {
+
+                return ChoiceChip(
+                  label:
+                      Text(
+                    sites[i].name,
+                  ),
+                  selected:
+                      _tab == i,
+                  onSelected:
+                      (_) async {
+
+                    setState(() {
+                      _tab = i;
+                    });
+
+                    await _ensureController(
+                      i,
+                    );
+                  },
+                );
+              },
             ),
+          ),
 
           Expanded(
-            child: body,
+            child:
+                _showResults
+                    ? _results()
+                    : _home(),
           ),
         ],
       ),
