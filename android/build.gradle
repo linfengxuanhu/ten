@@ -2,6 +2,11 @@ allprojects {
     repositories {
         google()
         mavenCentral()
+
+        // Mozilla GeckoView Maven repository
+        maven {
+            url "https://maven.mozilla.org/maven2/"
+        }
     }
 }
 
