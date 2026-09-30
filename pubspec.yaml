@@ -9,9 +9,13 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+
   cupertino_icons: ^1.0.8
-  url_launcher: ^6.3.2
   shared_preferences: ^2.5.5
+
+  # Mozilla GeckoView
+  webview_flutter_geckoview: ^0.0.1+2
+  webview_flutter_platform_interface: ^2.15.1
 
 dev_dependencies:
   flutter_test:
