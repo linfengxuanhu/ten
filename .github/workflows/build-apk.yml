@@ -23,10 +23,25 @@ jobs:
       - name: Flutter version
         run: flutter --version
 
-      # 当前项目需要重新生成 Android 平台文件
-      # 否则会出现 deleted Android v1 embedding 错误
       - name: Create Android platform files
         run: flutter create --platforms=android .
+
+      - name: Add R8 keep rules
+        run: |
+          mkdir -p android/app
+
+          cat > android/app/proguard-rules.pro <<'EOF'
+          # SnakeYAML optional JavaBean introspection classes
+          -dontwarn java.beans.BeanInfo
+          -dontwarn java.beans.FeatureDescriptor
+          -dontwarn java.beans.IntrospectionException
+          -dontwarn java.beans.Introspector
+          -dontwarn java.beans.PropertyDescriptor
+          EOF
+
+          echo "===== R8 rules ====="
+          cat android/app/proguard-rules.pro
+          echo "===================="
 
       - name: Get dependencies
         run: flutter pub get
@@ -41,16 +56,11 @@ jobs:
           echo "========================================"
 
           if [ -f build/app/outputs/mapping/release/missing_rules.txt ]; then
-            echo ""
-            echo "===== missing_rules.txt ====="
             cat build/app/outputs/mapping/release/missing_rules.txt
-            echo ""
-            echo "===== END missing_rules.txt ====="
           else
             echo "missing_rules.txt not found"
           fi
 
-          echo ""
           echo "========================================"
 
           exit ${BUILD_FAILED:-0}
