@@ -129,10 +129,8 @@ class _CouncilHomeState extends State<CouncilHome> {
 
   @override
   void dispose() {
-    for (final controller in _controllers) {
-      controller?.dispose();
-    }
-
+    // PlatformWebViewController 当前版本没有 dispose() 方法。
+    // 因此这里不再手动释放 WebView Controller。
     _prompt.dispose();
 
     super.dispose();
@@ -464,6 +462,19 @@ class _CouncilHomeState extends State<CouncilHome> {
       i++
     ) {
 
+      // 尚未创建的网页先创建。
+      if (_controllers[i] == null) {
+        try {
+          await _ensureController(i);
+        } catch (e) {
+          _setStatus(
+            i,
+            '加载失败',
+          );
+          continue;
+        }
+      }
+
       await _sendTo(i);
 
       await Future.delayed(
@@ -568,9 +579,8 @@ class _CouncilHomeState extends State<CouncilHome> {
     );
 
     if (!mounted) {
-
-      controller.dispose();
-
+      // 当前 PlatformWebViewController 没有 dispose()，
+      // 所以这里不再调用 dispose。
       return;
     }
 
@@ -694,59 +704,97 @@ class _CouncilHomeState extends State<CouncilHome> {
 
     if (controller == null) {
 
-      return FutureBuilder<
-          PlatformWebViewController>(
-        future:
-            _createController(i),
-        builder:
-            (
-          context,
-          snapshot,
-        ) {
+      return Column(
+        children: [
 
-          if (
-            snapshot.connectionState ==
-                ConnectionState.done &&
-            snapshot.hasData
-          ) {
+          _siteHeader(i),
 
-            final c =
-                snapshot.data!;
+          Expanded(
+            child: FutureBuilder<void>(
+              future: _ensureController(i),
+              builder:
+                  (
+                context,
+                snapshot,
+              ) {
 
-            _controllers[i] =
-                c;
+                if (
+                  snapshot.connectionState ==
+                      ConnectionState.waiting
+                ) {
 
-            return Column(
-              children: [
+                  return const Center(
+                    child:
+                        CircularProgressIndicator(),
+                  );
+                }
 
-                _siteHeader(i),
+                if (
+                  snapshot.hasError
+                ) {
 
-                Expanded(
-                  child:
-                      PlatformWebViewWidget(
-                    PlatformWebViewWidgetCreationParams(
-                      controller: c,
+                  return Center(
+                    child:
+                        Column(
+                      mainAxisSize:
+                          MainAxisSize.min,
+                      children: [
+
+                        const Icon(
+                          Icons.error_outline,
+                          size: 42,
+                        ),
+
+                        const SizedBox(
+                          height: 10,
+                        ),
+
+                        const Text(
+                          '网页加载失败',
+                        ),
+
+                        const SizedBox(
+                          height: 10,
+                        ),
+
+                        FilledButton(
+                          onPressed: () {
+
+                            setState(() {
+                              _controllers[i] =
+                                  null;
+                            });
+                          },
+                          child:
+                              const Text(
+                            '重试',
+                          ),
+                        ),
+                      ],
                     ),
-                  ).build(context),
-                ),
-              ],
-            );
-          }
+                  );
+                }
 
-          return Column(
-            children: [
+                final c =
+                    _controllers[i];
 
-              _siteHeader(i),
+                if (c == null) {
 
-              const Expanded(
-                child: Center(
-                  child:
-                      CircularProgressIndicator(),
-                ),
-              ),
-            ],
-          );
-        },
+                  return const Center(
+                    child:
+                        CircularProgressIndicator(),
+                  );
+                }
+
+                return PlatformWebViewWidget(
+                  PlatformWebViewWidgetCreationParams(
+                    controller: c,
+                  ),
+                ).build(context);
+              },
+            ),
+          ),
+        ],
       );
     }
 
@@ -926,8 +974,7 @@ class _CouncilHomeState extends State<CouncilHome> {
                                 ),
                               )
                             : const Icon(
-                                Icons
-                                    .send,
+                                Icons.send,
                               ),
                     label:
                         const Text(
